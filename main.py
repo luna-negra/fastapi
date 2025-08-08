@@ -1,3 +1,4 @@
+import re
 from typing import Annotated
 from enum import Enum
 from fastapi import (FastAPI,
@@ -5,8 +6,15 @@ from fastapi import (FastAPI,
                      Path,
                      Query,
                      Cookie,
-                     Header)
+                     Header,
+                     Response,
+                     Form,
+                     UploadFile,
+                     File,
+                     HTTPException,
+                     status)
 from dataclasses import dataclass
+from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import (BaseModel,
                       AfterValidator,
                       HttpUrl,
@@ -214,3 +222,90 @@ class HeaderTemplate(BaseModel):
 @app.get(path="/")
 async def main(header: Annotated[HeaderTemplate, Header()]):
     return {"msg": "ok", "header": header}
+
+class LoginResult1(BaseModel):
+    username: str
+
+class LoginResult2(BaseModel):
+    username: str
+    age: int | None = None
+
+class LoginTemplate(BaseModel):
+    username: str
+    password: str
+
+@app.post(path="/login/", tags=["users"], response_model=LoginResult1)
+async def login1(user: LoginTemplate):
+    return user
+
+@app.post(path="/login2/", tags=["users"],response_model=LoginResult2)
+async def login2(user: LoginTemplate) -> LoginTemplate:
+    return user
+
+# Return Response
+@app.get(path="/response")
+async def response(redirect: bool = False) -> Response:
+    url = "https://github.com"
+    return RedirectResponse(url=url) if redirect else JSONResponse(content={"msg": "ok", "url": url})
+
+
+class ExcludeItem(BaseModel):
+    name: str
+    price: float
+    tax_percentage: int
+    description: str | None = None
+
+@app.get(path="/exclude_field", response_model=ExcludeItem, response_model_exclude_unset=True)
+async def get_item() -> ExcludeItem:
+    return ExcludeItem(name="product1", price=10.2, tax_percentage=2)
+
+
+# Form Data and Files
+class LoginInput(BaseModel):
+    username: str | None = None
+    password: str | None = None
+    model_config = {"extra": "forbid"}
+
+class LoginResult(LoginInput):
+    result: str = "OK"
+    message: str = "Login Success"
+    session: str | None = None
+
+@app.post(path="/form_login",
+          tags=["users"],
+          response_model=LoginResult,
+          response_model_exclude={"username", "password"},
+          response_model_exclude_unset=True)
+async def legacy_login(login_input: Annotated[LoginInput, Form()]):
+    if login_input.username == "testuser" and login_input.password == "P@ssw0rd":
+        return LoginResult(session="R@ndl0mV@1ue")
+    return LoginResult(result="Fail",
+                       message="Fail to Login")
+
+@app.post(path="/upload_file", tags=["files"])
+async def upload_file(file: UploadFile):
+    return {"msg": "ok", "filename": file.filename, "size": file.size}
+
+@app.post("/upload_file2/", tags=["files"])
+async def create_file(file: Annotated[bytes, File()]):
+    if not file:
+        return {"message": "No file sent"}
+    else:
+        return {"file_size": len(file)}
+
+@app.post(path="/upload_files", tags=["files"])
+async def upload_multiple_files(files: list[UploadFile]):
+    return {"msg": "ok", "filenames": [ f.filename for f in files ]}
+
+@app.post(path="/upload_files2", tags=["files"])
+async def upload_multiple_files2(files: Annotated[list[bytes], File()]):
+    return {"msg": "ok", "filesize": [ len(f) for f in files ]}
+
+# HTTPException
+regex_dt = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}$")
+@app.get(path="/get_data/{date}")
+async def get_data(date: str):
+    if not regex_dt.match(date):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Date must be 'yyyy-mm-dd'.")
+    return {"msg": "ok", "data": date}
