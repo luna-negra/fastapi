@@ -1,5 +1,5 @@
 import re
-from typing import Annotated
+from typing import Annotated, Optional
 from enum import Enum
 from fastapi import (FastAPI,
                      Body,
@@ -12,9 +12,11 @@ from fastapi import (FastAPI,
                      UploadFile,
                      File,
                      HTTPException,
-                     status)
+                     status,
+                     Depends)
 from dataclasses import dataclass
 from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.encoders import jsonable_encoder
 from pydantic import (BaseModel,
                       AfterValidator,
                       HttpUrl,
@@ -309,3 +311,26 @@ async def get_data(date: str):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="Date must be 'yyyy-mm-dd'.")
     return {"msg": "ok", "data": date}
+
+# jsonable_encoder
+@app.get(path="/jsonable")
+async def jsonable_test():
+    json_encoded = jsonable_encoder(Product(name="test product",
+                                            version=1.0,
+                                            developer=Developer(name="alex",
+                                                                email="test@test.com",
+                                                                github="https://github.com/testuser")))
+    print(json_encoded)
+    return json_encoded
+
+# Dependencies
+async def common_parameter(q: str | None = None, start_idx: int = 0 , last_idx: int = 100):
+    return {"q": q, "start_idx": start_idx, "last_idx": last_idx}
+
+@app.get(path="/products/", tags=["dependency"])
+async def get_all_products(commons: Annotated[dict, Depends(common_parameter)]):
+    return commons
+
+@app.get(path="/users/", tags=["dependency"])
+async def get_all_users(commons: Annotated[dict, Depends(common_parameter)]):
+    return commons
