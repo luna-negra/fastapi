@@ -1,7 +1,11 @@
-from datetime import datetime, timedelta
+import uuid
+from typing import Optional
+from datetime import datetime, timedelta, timezone
+#from jose import jwt, JWTError
+import jwt
+from jwt import PyJWTError
 from typing import Annotated
-from fastapi import FastAPI, Body, Depends, Query, Path, HTTPException, status
-from fastapi.encoders import jsonable_encoder
+from fastapi import FastAPI, Depends, HTTPException, status, Response, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 
@@ -61,7 +65,7 @@ class UserRegisterRequestForm(UserPasswordInRequest, UserBasicResponseForm):
 
 
 app = FastAPI()
-security = HTTPBasic()
+http_scheme = HTTPBasic(scheme_name="HTTP Basic Authorization Test")
 
 @app.get(path="/",
          tags=["Health Check"],
@@ -139,7 +143,7 @@ async def user_logout(user: Annotated[UserUsername, Body(embed=True)]):
           summary="Login Account",
           response_model=BasicResponse,
           response_model_exclude_unset=True)
-async def user_login(user: HTTPBasicCredentials = Depends(security)):
+async def user_login(user: HTTPBasicCredentials = Depends(http_scheme)):
     for u in yield_dummy_data():
         if user.username == u.get("username") and user.password == u.get("password") and not u.get("is_login"):
             u.update({"is_login": True})
@@ -176,17 +180,19 @@ async def user_logout(username: str):
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                         detail=f"There is no logged in user '{username}'")
 
-### OAuth
+"""
+### OAuth Example with Token (Simple)
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     issue_datetime: datetime = datetime.now()
-    expire_datetime: datetime = datetime.now() + timedelta(minutes=15)
+    expire_datetime: datetime = datetime.now() + timedelta(minutes=1)
 
 @app.post(path="/oauth/token/",
           tags=["OAuth"],
           summary="get OAuth Token for authentication",
-          response_model=Token)
+          response_model=Token,
+          deprecated=True)
 async def get_token(account: OAuth2PasswordRequestForm = Depends()):
     for user in yield_dummy_data():
         if user.get("username") == account.username and user.get("password") == account.password:
@@ -199,7 +205,172 @@ async def get_token(account: OAuth2PasswordRequestForm = Depends()):
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="oauth/token")
 @app.get(path="/user/current",
          tags=["OAuth"],
-         summary="Get OAuth token for authorization")
+         summary="Get OAuth token for authorization",
+         deprecated=True)
 async def get_current_token(token: Annotated[str, Depends(oauth2_scheme)]):
     return {"current_token": token}
+"""
 
+### Session Test
+session_storage: dict = {}
+
+@app.post(path="/oauth/login",
+          tags=["OAuth Session"],
+          response_model=BasicResponse,
+          response_model_exclude_unset=True,
+          summary="OAuth Login Test")
+async def oauth_login(response: Response, req: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+    if req.cookies.get("session_id") is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Already Logged In.")
+
+    tmp: dict | None = None
+    for user in yield_dummy_data():
+        if form_data.username == user.get("username") and form_data.password == user.get("password"):
+            if form_data.username not in session_storage.values():
+                tmp = user
+                break
+
+    if tmp is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Mismatch username and password")
+
+    # store session information in db or in-memory
+    session_id: str = str(uuid.uuid4())
+    expire_datetime: datetime = datetime.now(timezone.utc) + timedelta(minutes=1)
+    session_storage.update({session_id: {"username": tmp.get("username"), "expire_datetime": expire_datetime}})
+
+    # send cookie to client browser
+    response.set_cookie(key="session_id", value=session_id, expires=expire_datetime)
+
+    return BasicResponse(msg="Succss to Login")
+
+
+@app.post(path="/oauth/logout/",
+          tags=["OAuth Session"],
+          response_model=BasicResponse,
+          response_model_exclude_unset=True)
+async def oauth_logout(res: Response, req: Request):
+    session_id = req.cookies.get("session_id") or None
+
+    # if browser has a session_id in the browser' cookie
+    if session_id is not None:# and session_storage.get(session_id).get("expire_datetime") > datetime.now():
+        # remove session_id from session_storage
+        if session_storage.get(session_id):
+            del session_storage[session_id]
+        # remove session_id from cookie
+        res.delete_cookie(key="session_id")
+
+        return BasicResponse(msg="Success to Logout")
+
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="You are already logged out.")
+
+
+### JWT Test
+# JWT requires secret_key and encryption algorithm
+# WARNING: SECRET_KEY is required to be called from env var.
+SECRET_KEY: str = "DUMMY_SECRET_KEY_FOR_ENCRYPTION"
+ALGORITHM: str = "HS256"
+# HS: HMAC Symmetric Algorithm
+# RS: RSA Asymmetric Algorithm
+# ES: ECDSA Asymmetric Algorithm (Ecliptic. more lighter than RS)
+# None: Not Recommended.
+
+class JWTToken(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class UserInDB(BaseModel):
+    username: str
+
+# function for creating JWT
+def create_jwt_token(username: str):
+    # create claims for JWT token data
+    # Registered claim: standard for JWT
+    # - iss: issuer
+    # - sub: subject, who will get this token
+    # - aud: receiver' domain or ip
+    # - exp: expiration(datetime)
+    # Private Claims: customized claims.
+    claim_data: dict = {
+        "iss": "luna-negra",
+        "sub": username,
+        "aud": "http://127.0.0.1:8000",    # this claim requires audience argument in jwt.decode.
+        "exp": datetime.now() + timedelta(minutes=15)
+    }
+
+    # create jwt token with encode method. * claims: dict form data.
+    token = jwt.encode(payload=claim_data, key=SECRET_KEY, algorithm=ALGORITHM)
+    return token
+
+
+oauth2_scheme = OAuth2PasswordBearer(scheme_name="OAuth2 Test", tokenUrl="oauth/jwt/login/")
+
+# implement JWT Login and get JWT Token
+@app.post(path="/oauth/jwt/login/",
+          tags=["JWT"],
+          response_model=JWTToken,
+          summary="JWT Login Test")
+async def oauth_jwt_login(res: Response, account: OAuth2PasswordRequestForm = Depends()):
+    for user in yield_dummy_data():
+        if account.username == user.get("username") and account.password == user.get("password"):
+            # get token by transmitting necessary data
+            token = create_jwt_token(username=account.username)
+            res.set_cookie(key="jwt", value=token, httponly=True)
+            return {"result": "ok", "msg": "success to create token", "access_token": token}
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Mismatch username and password.")
+
+# get user information decode JWT token
+async def get_user(req: Request):
+    token: str | None = req.cookies.get("jwt") or None
+    if token is None:
+        token: str = Depends(oauth2_scheme)
+
+    # validate key
+    try:
+        payload = jwt.decode(jwt=token,
+                             key=SECRET_KEY,
+                             algorithms=ALGORITHM,
+                             audience="http://127.0.0.1:8000")
+
+        if payload.get("sub") is None or payload.get("iss") != "luna-negra":
+            raise PyJWTError
+
+    except PyJWTError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Could not validate credentials",
+                            headers={"WWW-Authenticate": "Bearer"})
+
+    # check the aud in token is really exist.
+    for user in yield_dummy_data():
+        if user.get("username") == payload.get("sub"):
+            return UserInDB(username=payload.get("sub"))
+
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Could not validate credentials",
+                        headers={"WWW-Authenticate": "Bearer"})
+
+# GET CURRENT USER with JWT
+# protect endpoint by using 'get_user' function
+@app.get(path="/oauth/jwt/get_user/",
+         tags=["JWT"],
+         summary="Get user data using JWT")
+async def oauth_read_current_user(current_user: UserInDB = Depends(get_user)):
+    return current_user
+
+# Test for Logout with JWT
+@app.post(path="/oauth/jwt/logout/",
+          tags=["JWT"],
+          summary="Test Logout with JWT")
+async def oauth_jwt_logout(req: Request, res: Response, current_user: UserInDB = Depends(get_user)):
+    token: str | None = req.cookies.get("jwt") or None
+
+    if token is not None:
+        res.delete_cookie(key="jwt", httponly=True)
+        return {"result": "ok", "msg": "Success to logout"}
+
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="You are not logged in.")
