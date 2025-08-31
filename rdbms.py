@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 from fastapi import FastAPI, HTTPException, Depends, Path, status
-from sqlmodel import SQLModel, Session, Field, create_engine, select
+from sqlmodel import SQLModel, Session, Field, create_engine, select, func
+from sqlmodel.sql.expression import and_, or_
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -65,7 +66,23 @@ async def get_hero(name: str | None = None,
                    age: int | None = None,
                    secret_name: str | None = None,
                    session: Session = Depends(get_session)) -> list[Hero]:
-    heros = session.exec(statement=select(Hero)).all()
+
+    statement = select(Hero)
+    where_condition = []
+
+    if name is not None:
+        where_condition.append(func.lower(Hero.name).like(f"%{name.lower()}%"))
+
+    if age  is not None:
+        where_condition.append(Hero.age == age)
+
+    if secret_name is not None:
+        where_condition.append(func.lower(Hero.secret_name).like(f"%{secret_name.lower()}%"))
+
+    if len(where_condition) != 0:
+        statement = statement.where(or_(*where_condition))
+
+    heros = session.exec(statement=statement).all()
     return heros
 
 @app.post(path="/hero/",
